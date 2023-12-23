@@ -6,6 +6,8 @@ import os
 import re as regex
 import signal
 import sys as system
+import logging
+import sys
 
 # installed libraries
 import dateutil.parser as parser
@@ -13,6 +15,9 @@ import pathvalidate as path_validate
 import requests
 import tqdm as progress_bar
 
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 LAST_TOKEN_REFRESH_TIME = datetime.datetime.now()
 AUTHORIZATION_HEADER = {}
@@ -63,54 +68,26 @@ class Color:
     END = "\033[0m"
 
 
-def request_new_access_token():
+def request_access_token():
+    """ Request or refresh access token from Zoom API """
     global ACCESS_TOKEN, AUTHORIZATION_HEADER, LAST_TOKEN_REFRESH_TIME
     url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={ACCOUNT_ID}"
     client_cred = f"{CLIENT_ID}:{CLIENT_SECRET}"
-    client_cred_base64_string = base64.b64encode(
-        client_cred.encode("utf-8")).decode("utf-8")
-    headers = {
-        "Authorization": f"Basic {client_cred_base64_string}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    response = requests.request("POST", url, headers=headers)
-    response_json = json.loads(response.text)
+    client_cred_base64 = base64.b64encode(client_cred.encode()).decode()
+    headers = {"Authorization": f"Basic {client_cred_base64}",
+               "Content-Type": "application/x-www-form-urlencoded"}
     try:
+        response = requests.post(url, headers=headers)
+        response.raise_for_status()  # Raises HTTPError for bad responses
+        response_json = response.json()
         ACCESS_TOKEN = response_json["access_token"]
-        AUTHORIZATION_HEADER = {
-            "Authorization": f"Bearer {ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
+        AUTHORIZATION_HEADER = {"Authorization": f"Bearer {ACCESS_TOKEN}",
+                                "Content-Type": "application/json"}
         save_access_token(ACCESS_TOKEN)
         LAST_TOKEN_REFRESH_TIME = datetime.datetime.now()
-    except KeyError as e:
-        print(
-            f"{Color.RED}### Error in response: {e}, Response: {response.text}{Color.END}")
-
-
-def load_access_token():
-    global ACCESS_TOKEN, AUTHORIZATION_HEADER, LAST_TOKEN_REFRESH_TIME
-    url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={ACCOUNT_ID}"
-    client_cred = f"{CLIENT_ID}:{CLIENT_SECRET}"
-    client_cred_base64_string = base64.b64encode(
-        client_cred.encode("utf-8")).decode("utf-8")
-    headers = {
-        "Authorization": f"Basic {client_cred_base64_string}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    response = requests.request("POST", url, headers=headers)
-    response_json = json.loads(response.text)
-    try:
-        ACCESS_TOKEN = response_json["access_token"]
-        AUTHORIZATION_HEADER = {
-            "Authorization": f"Bearer {ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        save_access_token(ACCESS_TOKEN)  # Updated this line
-        LAST_TOKEN_REFRESH_TIME = datetime.datetime.now()
-    except KeyError as e:
-        print(
-            f"{Color.RED}### Error in response: {e}, Response: {response.text}{Color.END}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error in getting access token: {e}")
+        sys.exit(1)  # Exit the script if token retrieval fails
 
 
 def get_users():
@@ -240,7 +217,7 @@ def list_recordings(email):
 def download_recording(download_url, email, filename, folder_name):
     global LAST_TOKEN_REFRESH_TIME
     if datetime.datetime.now() - LAST_TOKEN_REFRESH_TIME > datetime.timedelta(minutes=55):
-        request_new_access_token()
+        request_access_token()
     dl_dir = os.sep.join([DOWNLOAD_DIRECTORY, folder_name])
     sanitized_download_dir = path_validate.sanitize_filepath(dl_dir)
     sanitized_filename = path_validate.sanitize_filename(filename)
@@ -292,6 +269,13 @@ def handle_graceful_shutdown(signal_received, frame):
     system.exit(0)
 
 
+def is_token_valid():
+    """ Check if the current access token is valid. """
+    test_url = "https://api.zoom.us/v2/users/me"
+    response = requests.get(test_url, headers=AUTHORIZATION_HEADER)
+    return response.ok
+
+
 def main():
     # clear the screen buffer
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -313,9 +297,14 @@ def main():
             "Authorization": f"Bearer {ACCESS_TOKEN}",
             "Content-Type": "application/json"
         }
+        if not is_token_valid():
+            logging.info(
+                "Access token is invalid or expired. Refreshing token.")
+            request_access_token()
     except FileNotFoundError:
-        # If tokens file does not exist, get a new access token
-        request_new_access_token()
+        logging.info(
+            "Access token file not found. Requesting new access token.")
+        request_access_token()
 
     load_completed_meeting_ids()
 
